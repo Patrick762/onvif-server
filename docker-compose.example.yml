@@ -1,0 +1,24 @@
+services:
+  onvif:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - 8081:8081
+      - 8554:8554
+      - 8580:8580
+    environment:
+      - ONVIF_PORT=8081
+      - RTSP_PORT=8554
+      - SNAPSHOT_PORT=8580
+      - STREAM_UUID=
+      - STREAM_RTSP_PATH=
+      - STREAM_SNAPSHOT_PATH=
+      - STREAM_WIDTH=
+      - STREAM_HEIGHT=
+      - STREAM_FRAMERATE=
+      - STREAM_BITRATE=
+      - STREAM_QUALITY=
+      - STREAM_TARGET_HOST=
+      - STREAM_TARGET_RTSP=
+      - STREAM_TARGET_SNAPSHOT=

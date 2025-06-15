@@ -1,6 +1,5 @@
 const tcpProxy = require('node-tcp-proxy');
 const onvifServer = require('./src/onvif-server');
-const configBuilder = require('./src/config-builder');
 const package = require('./package.json');
 const argparse = require('argparse');
 const readline = require('readline');
@@ -14,9 +13,7 @@ const parser = new argparse.ArgumentParser({
 });
 
 parser.add_argument('-v', '--version', { action: 'store_true', help: 'show the version information' });
-parser.add_argument('-cc', '--create-config', { action: 'store_true', help: 'create a new config' });
 parser.add_argument('-d', '--debug', { action: 'store_true', help: 'show onvif requests' });
-parser.add_argument('config', { help: 'config filename to use', nargs: '?'});
 
 let args = parser.parse_args();
 
@@ -30,99 +27,71 @@ if (args) {
         return;
     }
 
-    if (args.create_config) {
-        let mutableStdout = new stream.Writable({
-            write: function(chunk, encoding, callback) {
-                if (!this.muted || chunk.toString().includes('\n'))
-                    process.stdout.write(chunk, encoding);
-                callback();
-            }
-        });
+    // Create config from env variables
+    const configData = `
+onvif:
+  - hostname: 0.0.0.0
+    ports:
+      server: ${process.env.ONVIF_PORT}
+      rtsp: ${process.env.RTSP_PORT}
+      snapshot: ${process.env.SNAPSHOT_PORT}
+    name: Channel1
+    uuid: ${process.env.STREAM_UUID}
+    highQuality:
+      rtsp: ${process.env.STREAM_RTSP_PATH}
+      snapshot: ${process.env.STREAM_SNAPSHOT_PATH}
+      width: ${process.env.STREAM_WIDTH}
+      height: ${process.env.STREAM_HEIGHT}
+      framerate: ${process.env.STREAM_FRAMERATE}
+      bitrate: ${process.env.STREAM_BITRATE}
+      quality: ${process.env.STREAM_QUALITY}
+    target:
+      hostname: ${process.env.STREAM_TARGET_HOST}
+      ports:
+        rtsp: ${process.env.STREAM_TARGET_RTSP}
+        snapshot: ${process.env.STREAM_TARGET_SNAPSHOT}
+    `;
 
-        const rl = readline.createInterface({
-            input: process.stdin,
-            output: mutableStdout,
-            terminal: true
-        });
+    try {
+        config = yaml.parse(configData);
+    } catch (error) {
+        logger.error('Failed to read config, invalid yaml syntax.')
+        return -1;
+    }
 
-        mutableStdout.muted = false;
-        rl.question('Onvif Server: ', (hostname) => {
-            rl.question('Onvif Username: ', (username) => {
-                mutableStdout.muted = true;
-                process.stdout.write('Onvif Password: ');
-                rl.question('', (password) => {
-                    console.log('Generating config ...');
-                    configBuilder.createConfig(hostname, username, password).then((config) => {
-                        if (config) {
-                            console.log('# ==================== CONFIG START ====================');
-                            console.log(yaml.stringify(config));
-                            console.log('# ===================== CONFIG END =====================');
-                        } else
-                        console.log('Failed to create config!');
-                    });
-                    rl.close();
-                });
-            });
-        });
+    let proxies = {};
 
-    } else if (args.config) {
-        let configData;
-        try {
-            configData = fs.readFileSync(args.config, 'utf8');
-        } catch (error) {
-            if (error.code === 'ENOENT') {
-                logger.error('File not found: ' + args.config);
-                return -1;
-            }
-            throw error;
-        }
+    for (let onvifConfig of config.onvif) {
+        let server = onvifServer.createServer(onvifConfig, logger);
+        if (server.getHostname()) {
+            logger.info(`Starting virtual onvif server for ${onvifConfig.name} on ${server.getHostname()}:${onvifConfig.ports.server} ...`);
+            server.startServer();
+            server.startDiscovery();
+            if (args.debug)
+                server.enableDebugOutput();
+            logger.info('  Started!');
+            logger.info('');
 
-        let config;
-        try {
-            config = yaml.parse(configData);
-        } catch (error) {
-            logger.error('Failed to read config, invalid yaml syntax.')
+            if (!proxies[onvifConfig.target.hostname])
+                proxies[onvifConfig.target.hostname] = {}
+            
+            if (onvifConfig.ports.rtsp && onvifConfig.target.ports.rtsp)
+                proxies[onvifConfig.target.hostname][onvifConfig.ports.rtsp] = onvifConfig.target.ports.rtsp;
+            if (onvifConfig.ports.snapshot && onvifConfig.target.ports.snapshot)
+                proxies[onvifConfig.target.hostname][onvifConfig.ports.snapshot] = onvifConfig.target.ports.snapshot;
+        } else {
+            logger.error(`Failed to find IP address for MAC address ${onvifConfig.mac}`)
             return -1;
         }
-
-        let proxies = {};
-
-        for (let onvifConfig of config.onvif) {
-            let server = onvifServer.createServer(onvifConfig, logger);
-            if (server.getHostname()) {
-                logger.info(`Starting virtual onvif server for ${onvifConfig.name} on ${onvifConfig.mac} ${server.getHostname()}:${onvifConfig.ports.server} ...`);
-                server.startServer();
-                server.startDiscovery();
-                if (args.debug)
-                    server.enableDebugOutput();
-                logger.info('  Started!');
-                logger.info('');
-
-                if (!proxies[onvifConfig.target.hostname])
-                    proxies[onvifConfig.target.hostname] = {}
-                
-                if (onvifConfig.ports.rtsp && onvifConfig.target.ports.rtsp)
-                    proxies[onvifConfig.target.hostname][onvifConfig.ports.rtsp] = onvifConfig.target.ports.rtsp;
-                if (onvifConfig.ports.snapshot && onvifConfig.target.ports.snapshot)
-                    proxies[onvifConfig.target.hostname][onvifConfig.ports.snapshot] = onvifConfig.target.ports.snapshot;
-            } else {
-                logger.error(`Failed to find IP address for MAC address ${onvifConfig.mac}`)
-                return -1;
-            }
+    }
+    
+    for (let destinationAddress in proxies) {
+        for (let sourcePort in proxies[destinationAddress]) {
+            logger.info(`Starting tcp proxy from port ${sourcePort} to ${destinationAddress}:${proxies[destinationAddress][sourcePort]} ...`);
+            tcpProxy.createProxy(sourcePort, destinationAddress, proxies[destinationAddress][sourcePort]);
+            logger.info('  Started!');
+            logger.info('');
         }
-        
-        for (let destinationAddress in proxies) {
-            for (let sourcePort in proxies[destinationAddress]) {
-                logger.info(`Starting tcp proxy from port ${sourcePort} to ${destinationAddress}:${proxies[destinationAddress][sourcePort]} ...`);
-                tcpProxy.createProxy(sourcePort, destinationAddress, proxies[destinationAddress][sourcePort]);
-                logger.info('  Started!');
-                logger.info('');
-            }
-        }
-
-    } else {
-        logger.error('Please specifiy a config filename!');
-        return -1;
     }
 
     return 0;

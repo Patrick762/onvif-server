@@ -31,9 +31,6 @@ class OnvifServer {
         this.config = config;
         this.logger = logger;
 
-        if (!this.config.hostname)
-            this.config.hostname = getIpAddressFromMac(this.config.mac);
-
         this.videoSource = {
             attributes: {
                 token: 'video_src_token'
